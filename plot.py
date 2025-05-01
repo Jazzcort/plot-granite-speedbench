@@ -8,7 +8,7 @@ from enum import Enum
 from typing import List
 
 class DataType(Enum):
-    TTFT = "time_to_first_token"
+    TTFT = "prompt_eval_time"
     TPS = "tokens_per_sec"
 
 home_dir = os.path.expanduser("~")
@@ -20,8 +20,12 @@ def quadratic_model(x, a, b, c):
 def linear_model(x, a, b):
     return a * x + b
 
-def plot_result(x_data, y_data, data_type: DataType, fit_model, out_path):
-    popt, _ = curve_fit(fit_model, x_data, y_data)
+def plot_result(x_data, y_data, data_type: DataType, fit_model, out_path, sigma=None):
+    if len(x_data) == 0 or len(y_data) == 0:
+        print(f"No valid data to plot: {data_type.value} vs context")
+        return 
+
+    popt, _ = curve_fit(fit_model, x_data, y_data, sigma=sigma, absolute_sigma=False)
     x_limit, y_limit = np.max(x_data), np.max(y_data)
     x_limit, y_limit = x_limit * 1.05, y_limit * 1.05
     unit = "seconds" if data_type == DataType.TTFT else "seconds/token"
@@ -52,22 +56,43 @@ def read_csv(path: str):
             res.append(row)
     return res
 
-def extract_data(sample_lst, data_type: DataType):
-    num_tokens = np.array([])
-    data = np.array([])
+def extract_prefill_data(sample_lst):
+    prompt_tokens = np.array([])
+    prompt_eval_times = np.array([])
     try:
         for row in sample_lst:
-            num_tokens = np.append(num_tokens, row["num_tokens"])
-            data = np.append(data, row[data_type.value])
+            parsed_prompt_tokens = float(row["prompt_tokens"])
+            parsed_dataparsed_prompt_eval_time = float(row[DataType.TTFT.value])
+            # Only collect the meanful data
+            if parsed_dataparsed_prompt_eval_time > 0 and parsed_prompt_tokens > 0:
+                prompt_tokens = np.append(prompt_tokens, parsed_prompt_tokens)
+                prompt_eval_times = np.append(prompt_eval_times, parsed_dataparsed_prompt_eval_time)
+            else:
+                continue
     except KeyError:
         return None
 
-    num_tokens, data = num_tokens.astype(float), data.astype(float)
+    return prompt_tokens, prompt_eval_times
 
-    if data_type == DataType.TPS:
-        data = np.reciprocal(data)
+def extract_decode_data(sample_lst):
+    n0 = np.array([])
+    n1_minus_n0 = np.array([])
+    decode_times = np.array([])
 
-    return num_tokens, data
+    try:
+        for row in sample_lst:
+            parsed_decode_start_token = float(row["decode_start_token"])
+            parsed_tokens_per_sec = float(row["tokens_per_sec"])
+            parsed_decode_time = float(row["decode_time"])
+
+            if parsed_decode_start_token > 0 and parsed_tokens_per_sec > 0 and parsed_decode_time > 0:
+                n0 = np.append(n0, parsed_decode_start_token)
+                n1_minus_n0 = np.append(n1_minus_n0, parsed_tokens_per_sec * parsed_decode_time)
+                decode_times = np.append(decode_times, parsed_decode_time)
+    except KeyError:
+        return None
+
+    return n0, n1_minus_n0, decode_times
 
 def extract_model_name(input_filename: str):
     name_parts = input_filename.split(".")
@@ -144,8 +169,8 @@ def main():
                 generate_sample_mean_and_standard_error(sample_lst)
                 print("************************************************************************")
 
-                # Plot num_tokens vs time_to_first_token
-                res = extract_data(sample_lst, DataType.TTFT)
+                # Plot tokens vs time_to_first_token
+                res = extract_prefill_data(sample_lst)
                 if res:
                     x_data, y_data = res
                     out_file = generate_output_filename(model_name, DataType.TTFT)
@@ -153,12 +178,14 @@ def main():
                 else:
                     is_invalid = True
 
-                # Plot num_tokens vs tokens_per_sec
-                res = extract_data(sample_lst, DataType.TPS)
+                # Plot tokens vs tokens_per_sec
+                res = extract_decode_data(sample_lst)
                 if res:
-                    x_data, y_data = res
+                    n0, n1_minus_n0, decode_times = res
                     out_file = generate_output_filename(model_name, DataType.TPS)
-                    plot_result(x_data, y_data, DataType.TPS, linear_model, f"{root}/{out_file}")
+                    x_data = (n1_minus_n0 + (2 * n0)) / 2
+                    y_data = decode_times / n1_minus_n0
+                    plot_result(x_data, y_data, DataType.TPS, linear_model, f"{root}/{out_file}", 1/n1_minus_n0)
                 else:
                     is_invalid = True
 
